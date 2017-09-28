@@ -36,6 +36,9 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
+
 #ifndef SG
 #define SG /* Scatter-Gather / iovec support in Snappy */
 #endif
@@ -54,6 +57,12 @@
 #else
 #include "snappy.h"
 #include "snappy_compat.h"
+#endif
+
+#include "rd.h"
+
+#ifdef _MSC_VER
+#define inline __inline
 #endif
 
 #define CRASH_UNLESS(x) BUG_ON(!(x))
@@ -120,19 +129,109 @@ static inline bool is_little_endian(void)
 	return false;
 }
 
+#if defined(__xlc__) // xlc compiler on AIX
+#define rd_clz(n)   __cntlz4(n)
+#define rd_ctz(n)   __cnttz4(n)
+#define rd_ctz64(n) __cnttz8(n)
+
+#elif defined(__SUNPRO_C) // Solaris Studio compiler on sun  
+/*
+ * Source for following definitions is Hacker’s Delight, Second Edition by Henry S. Warren
+ * http://www.hackersdelight.org/permissions.htm
+ */
+u32 rd_clz(u32 x) {
+   u32 n;
+
+   if (x == 0) return(32);
+   n = 1;
+   if ((x >> 16) == 0) {n = n +16; x = x <<16;}
+   if ((x >> 24) == 0) {n = n + 8; x = x << 8;}
+   if ((x >> 28) == 0) {n = n + 4; x = x << 4;}
+   if ((x >> 30) == 0) {n = n + 2; x = x << 2;}
+   n = n - (x >> 31);
+   return n;
+}
+
+u32 rd_ctz(u32 x) {
+   u32 y;
+   u32 n;
+
+   if (x == 0) return 32;
+   n = 31;
+   y = x <<16;  if (y != 0) {n = n -16; x = y;}
+   y = x << 8;  if (y != 0) {n = n - 8; x = y;}
+   y = x << 4;  if (y != 0) {n = n - 4; x = y;}
+   y = x << 2;  if (y != 0) {n = n - 2; x = y;}
+   y = x << 1;  if (y != 0) {n = n - 1;}
+   return n;
+}
+
+u64 rd_ctz64(u64 x) {
+   u64 y;
+   u64 n;
+
+   if (x == 0) return 64;
+   n = 63;
+   y = x <<32;  if (y != 0) {n = n -32; x = y;}
+   y = x <<16;  if (y != 0) {n = n -16; x = y;}
+   y = x << 8;  if (y != 0) {n = n - 8; x = y;}
+   y = x << 4;  if (y != 0) {n = n - 4; x = y;}
+   y = x << 2;  if (y != 0) {n = n - 2; x = y;}
+   y = x << 1;  if (y != 0) {n = n - 1;}
+   return n;
+}
+#elif !defined(_MSC_VER)
+#define rd_clz(n)   __builtin_clz(n)
+#define rd_ctz(n)   __builtin_ctz(n)
+#define rd_ctz64(n) __builtin_ctzll(n)
+#else
+#include <intrin.h>
+static int inline rd_clz(u32 x) {
+	int r = 0;
+	if (_BitScanForward(&r, x))
+		return 31 - r;
+	else
+		return 32;
+}
+
+static int inline rd_ctz(u32 x) {
+	int r = 0;
+	if (_BitScanForward(&r, x))
+		return r;
+	else
+		return 32;
+}
+
+static int inline rd_ctz64(u64 x) {
+#ifdef _M_X64
+	int r = 0;
+	if (_BitScanReverse64(&r, x))
+		return r;
+	else
+		return 64;
+#else
+	int r;
+	if ((r = rd_ctz(x & 0xffffffff)) < 32)
+		return r;
+	return 32 + rd_ctz(x >> 32);
+#endif
+}
+#endif
+
+
 static inline int log2_floor(u32 n)
 {
-	return n == 0 ? -1 : 31 ^ __builtin_clz(n);
+	return n == 0 ? -1 : 31 ^ rd_clz(n);
 }
 
-static inline __attribute__((unused)) int find_lsb_set_non_zero(u32 n)
+static inline RD_UNUSED int find_lsb_set_non_zero(u32 n)
 {
-	return __builtin_ctz(n);
+	return rd_ctz(n);
 }
 
-static inline int find_lsb_set_non_zero64(u64 n)
+static inline RD_UNUSED int find_lsb_set_non_zero64(u64 n)
 {
-	return __builtin_ctzll(n);
+	return rd_ctz64(n);
 }
 
 #define kmax32 5
@@ -225,6 +324,11 @@ static inline char *varint_encode32(char *sptr, u32 v)
 
 #ifdef SG
 
+static inline void *n_bytes_after_addr(void *addr, size_t n_bytes)
+{
+    return (void *) ((char *)addr + n_bytes);
+}
+
 struct source {
 	struct iovec *iov;
 	int iovlen;
@@ -236,16 +340,16 @@ struct source {
 /* Only valid at beginning when nothing is consumed */
 static inline int available(struct source *s)
 {
-	return s->total;
+	return (int) s->total;
 }
 
 static inline const char *peek(struct source *s, size_t *len)
 {
 	if (likely(s->curvec < s->iovlen)) {
 		struct iovec *iv = &s->iov[s->curvec];
-		if (s->curoff < iv->iov_len) { 
+		if ((unsigned)s->curoff < (size_t)iv->iov_len) { 
 			*len = iv->iov_len - s->curoff;
-			return (char *)iv->iov_base + s->curoff;
+			return n_bytes_after_addr(iv->iov_base, s->curoff);
 		}
 	}
 	*len = 0;
@@ -255,9 +359,10 @@ static inline const char *peek(struct source *s, size_t *len)
 static inline void skip(struct source *s, size_t n)
 {
 	struct iovec *iv = &s->iov[s->curvec];
-	s->curoff += n;
-	DCHECK_LE(s->curoff, iv->iov_len);
-	if (s->curoff >= iv->iov_len && s->curvec + 1 < s->iovlen) {
+	s->curoff += (int) n;
+	DCHECK_LE((unsigned)s->curoff, (size_t)iv->iov_len);
+	if ((unsigned)s->curoff >= (size_t)iv->iov_len &&
+	    s->curvec + 1 < s->iovlen) {
 		s->curoff = 0;
 		s->curvec++;
 	}
@@ -274,28 +379,28 @@ struct sink {
 static inline void append(struct sink *s, const char *data, size_t n)
 {
 	struct iovec *iov = &s->iov[s->curvec];
-	char *dst = (char *)iov->iov_base + s->curoff;
+	char *dst = n_bytes_after_addr(iov->iov_base, s->curoff);
 	size_t nlen = min_t(size_t, iov->iov_len - s->curoff, n);
 	if (data != dst)
 		memcpy(dst, data, nlen);
-	s->written += n;
-	s->curoff += nlen;
+	s->written += (int) n;
+	s->curoff += (int) nlen;
 	while ((n -= nlen) > 0) {
 		data += nlen;
 		s->curvec++;
-		DCHECK_LT(s->curvec, s->iovlen);
+		DCHECK_LT((signed)s->curvec, s->iovlen);
 		iov++;
-		nlen = min_t(size_t, iov->iov_len, n);
+		nlen = min_t(size_t, (size_t)iov->iov_len, n);
 		memcpy(iov->iov_base, data, nlen);
-		s->curoff = nlen;
+		s->curoff = (int) nlen;
 	}
 }
 
 static inline void *sink_peek(struct sink *s, size_t n)
 {
 	struct iovec *iov = &s->iov[s->curvec];
-	if (s->curvec < iov->iov_len && iov->iov_len - s->curoff >= n)
-		return (char *)iov->iov_base + s->curoff;
+	if (s->curvec < (size_t)iov->iov_len && iov->iov_len - s->curoff >= n)
+		return n_bytes_after_addr(iov->iov_base, s->curoff);
 	return NULL;
 }
 
@@ -438,9 +543,9 @@ static inline bool writer_append_from_self(struct writer *w, u32 offset,
 {
 	char *const op = w->op;
 	CHECK_LE(op, w->op_limit);
-	const u32 space_left = w->op_limit - op;
+	const u32 space_left = (u32) (w->op_limit - op);
 
-	if (op - w->base <= offset - 1u)	/* -1u catches offset==0 */
+	if ((unsigned)(op - w->base) <= offset - 1u)	/* -1u catches offset==0 */
 		return false;
 	if (len <= 16 && offset >= 8 && space_left >= 16) {
 		/* Fast path, used for the majority (70-80%) of dynamic
@@ -466,7 +571,7 @@ static inline bool writer_append(struct writer *w, const char *ip, u32 len)
 {
 	char *const op = w->op;
 	CHECK_LE(op, w->op_limit);
-	const u32 space_left = w->op_limit - op;
+	const u32 space_left = (u32) (w->op_limit - op);
 	if (space_left < len)
 		return false;
 	memcpy(op, ip, len);
@@ -478,7 +583,7 @@ static inline bool writer_try_fast_append(struct writer *w, const char *ip,
 					  u32 available_bytes, u32 len)
 {
 	char *const op = w->op;
-	const int space_left = w->op_limit - op;
+	const int space_left = (int) (w->op_limit - op);
 	if (len <= 16 && available_bytes >= 16 && space_left >= 16) {
 		/* Fast path, used for the majority (~95%) of invocations */
 		unaligned_copy64(ip, op);
@@ -529,11 +634,11 @@ static inline u32 hash(const char *p, int shift)
  *
  * This last factor dominates the blowup, so the final estimate is:
  */
-size_t snappy_max_compressed_length(size_t source_len)
+size_t rd_kafka_snappy_max_compressed_length(size_t source_len)
 {
 	return 32 + source_len + source_len / 6;
 }
-EXPORT_SYMBOL(snappy_max_compressed_length);
+EXPORT_SYMBOL(rd_kafka_snappy_max_compressed_length);
 
 enum {
 	LITERAL = 0,
@@ -634,14 +739,14 @@ static inline char *emit_copy(char *op, int offset, int len)
 }
 
 /**
- * snappy_uncompressed_length - return length of uncompressed output.
+ * rd_kafka_snappy_uncompressed_length - return length of uncompressed output.
  * @start: compressed buffer
  * @n: length of compressed buffer.
  * @result: Write the length of the uncompressed output here.
  *
  * Returns true when successfull, otherwise false.
  */
-bool snappy_uncompressed_length(const char *start, size_t n, size_t * result)
+bool rd_kafka_snappy_uncompressed_length(const char *start, size_t n, size_t * result)
 {
 	u32 v = 0;
 	const char *limit = start + n;
@@ -652,7 +757,7 @@ bool snappy_uncompressed_length(const char *start, size_t n, size_t * result)
 		return false;
 	}
 }
-EXPORT_SYMBOL(snappy_uncompressed_length);
+EXPORT_SYMBOL(rd_kafka_snappy_uncompressed_length);
 
 /*
  * The size of a compression block. Note that many parts of the compression
@@ -919,7 +1024,7 @@ static char *compress_fragment(const char *const input,
 				DCHECK_GE(candidate, baseip);
 				DCHECK_LT(candidate, ip);
 
-				table[hval] = ip - baseip;
+				table[hval] = (u16) (ip - baseip);
 			} while (likely(UNALIGNED_LOAD32(ip) !=
 					UNALIGNED_LOAD32(candidate)));
 
@@ -929,7 +1034,7 @@ static char *compress_fragment(const char *const input,
  * bytes [next_emit, ip) are unmatched.  Emit them as "literal bytes."
  */
 			DCHECK_LE(next_emit + 16, ip_end);
-			op = emit_literal(op, next_emit, ip - next_emit, true);
+			op = emit_literal(op, next_emit, (int) (ip - next_emit), true);
 
 /*
  * Step 3: Call EmitCopy, and then see if another EmitCopy could
@@ -954,7 +1059,7 @@ static char *compress_fragment(const char *const input,
 				    find_match_length(candidate + 4, ip + 4,
 						      ip_end);
 				ip += matched;
-				int offset = base - candidate;
+				int offset = (int) (base - candidate);
 				DCHECK_EQ(0, memcmp(base, candidate, matched));
 				op = emit_copy(op, offset, matched);
 /*
@@ -970,13 +1075,13 @@ static char *compress_fragment(const char *const input,
 				u32 prev_hash =
 				    hash_bytes(get_u32_at_offset
 					       (input_bytes, 0), shift);
-				table[prev_hash] = ip - baseip - 1;
+				table[prev_hash] = (u16) (ip - baseip - 1);
 				u32 cur_hash =
 				    hash_bytes(get_u32_at_offset
 					       (input_bytes, 1), shift);
 				candidate = baseip + table[cur_hash];
 				candidate_bytes = UNALIGNED_LOAD32(candidate);
-				table[cur_hash] = ip - baseip;
+				table[cur_hash] = (u16) (ip - baseip);
 			} while (get_u32_at_offset(input_bytes, 1) ==
 				 candidate_bytes);
 
@@ -990,7 +1095,7 @@ static char *compress_fragment(const char *const input,
 emit_remainder:
 	/* Emit the remaining bytes as a literal */
 	if (next_emit < ip_end)
-		op = emit_literal(op, next_emit, ip_end - next_emit, false);
+		op = emit_literal(op, next_emit, (int) (ip_end - next_emit), false);
 
 	return op;
 }
@@ -1148,7 +1253,7 @@ static void decompress_all_tags(struct snappy_decompressor *d,
 
 		if ((c & 0x3) == LITERAL) {
 			u32 literal_length = (c >> 2) + 1;
-			if (writer_try_fast_append(writer, ip, d->ip_limit - ip, 
+			if (writer_try_fast_append(writer, ip, (u32) (d->ip_limit - ip), 
 						   literal_length)) {
 				DCHECK_LT(literal_length, 61);
 				ip += literal_length;
@@ -1163,7 +1268,7 @@ static void decompress_all_tags(struct snappy_decompressor *d,
 				ip += literal_ll;
 			}
 
-			u32 avail = d->ip_limit - ip;
+			u32 avail = (u32) (d->ip_limit - ip);
 			while (avail < literal_length) {
 				if (!writer_append(writer, ip, avail))
 					return;
@@ -1171,7 +1276,7 @@ static void decompress_all_tags(struct snappy_decompressor *d,
 				skip(d->reader, d->peeked);
 				size_t n;
 				ip = peek(d->reader, &n);
-				avail = n;
+				avail = (u32) n;
 				d->peeked = avail;
 				if (avail == 0)
 					return;	/* Premature end of input */
@@ -1215,7 +1320,7 @@ static bool refill_tag(struct snappy_decompressor *d)
 		/* Fetch a new fragment from the reader */
 		skip(d->reader, d->peeked); /* All peeked bytes are used up */
 		ip = peek(d->reader, &n);
-		d->peeked = n;
+		d->peeked = (u32) n;
 		if (n == 0) {
 			d->eof = true;
 			return false;
@@ -1231,7 +1336,7 @@ static bool refill_tag(struct snappy_decompressor *d)
 	DCHECK_LE(needed, sizeof(d->scratch));
 
 	/* Read more bytes from reader if needed */
-	u32 nbuf = d->ip_limit - ip;
+	u32 nbuf = (u32) (d->ip_limit - ip);
 
 	if (nbuf < needed) {
 		/*
@@ -1248,7 +1353,7 @@ static bool refill_tag(struct snappy_decompressor *d)
 			const char *src = peek(d->reader, &length);
 			if (length == 0)
 				return false;
-			u32 to_add = min_t(u32, needed - nbuf, length);
+			u32 to_add = min_t(u32, needed - nbuf, (u32) length);
 			memcpy(d->scratch + nbuf, src, to_add);
 			nbuf += to_add;
 			skip(d->reader, to_add);
@@ -1298,7 +1403,7 @@ static int internal_uncompress(struct source *r,
 	return -EIO;
 }
 
-static inline int compress(struct snappy_env *env, struct source *reader,
+static inline int sn_compress(struct snappy_env *env, struct source *reader,
 			   struct sink *writer)
 {
 	int err;
@@ -1353,7 +1458,7 @@ static inline int compress(struct snappy_env *env, struct source *reader,
 
 		/* Compress input_fragment and append to dest */
 		char *dest;
-		dest = sink_peek(writer, snappy_max_compressed_length(num_to_read));
+		dest = sink_peek(writer, rd_kafka_snappy_max_compressed_length(num_to_read));
 		if (!dest) {
 			/*
 			 * Need a scratch buffer for the output,
@@ -1378,35 +1483,29 @@ out:
 
 #ifdef SG
 
-int snappy_compress_iov(struct snappy_env *env,
-			struct iovec *iov_in,
-			int iov_in_len,
-			size_t input_length,
-			struct iovec *iov_out,
-			int *iov_out_len,
-			size_t *compressed_length)
-{
-	struct source reader = {
-		.iov = iov_in,
-		.iovlen = iov_in_len,
-		.total = input_length
-	};
-	struct sink writer = {
-		.iov = iov_out,
-		.iovlen = *iov_out_len,
-	};
-	int err = compress(env, &reader, &writer);
+int rd_kafka_snappy_compress_iov(struct snappy_env *env,
+                                 const struct iovec *iov_in, size_t iov_in_cnt,
+                                 size_t input_length,
+                                 struct iovec *iov_out) {
+        struct source reader = {
+                .iov = (struct iovec *)iov_in,
+                .iovlen = (int)iov_in_cnt,
+                .total = input_length
+        };
+        struct sink writer = {
+                .iov = iov_out,
+                .iovlen = 1
+        };
+        int err = sn_compress(env, &reader, &writer);
 
-	*iov_out_len = writer.curvec + 1;
+        iov_out->iov_len = writer.written;
 
-	/* Compute how many bytes were added */
-	*compressed_length = writer.written;
-	return err;
+        return err;
 }
-EXPORT_SYMBOL(snappy_compress_iov);
+EXPORT_SYMBOL(rd_kafka_snappy_compress_iov);
 
 /**
- * snappy_compress - Compress a buffer using the snappy compressor.
+ * rd_kafka_snappy_compress - Compress a buffer using the snappy compressor.
  * @env: Preallocated environment
  * @input: Input buffer
  * @input_length: Length of input_buffer
@@ -1416,13 +1515,13 @@ EXPORT_SYMBOL(snappy_compress_iov);
  * Return 0 on success, otherwise an negative error code.
  *
  * The output buffer must be at least
- * snappy_max_compressed_length(input_length) bytes long.
+ * rd_kafka_snappy_max_compressed_length(input_length) bytes long.
  *
- * Requires a preallocated environment from snappy_init_env.
+ * Requires a preallocated environment from rd_kafka_snappy_init_env.
  * The environment does not keep state over individual calls
  * of this function, just preallocates the memory.
  */
-int snappy_compress(struct snappy_env *env,
+int rd_kafka_snappy_compress(struct snappy_env *env,
 		    const char *input,
 		    size_t input_length,
 		    char *compressed, size_t *compressed_length)
@@ -1435,14 +1534,13 @@ int snappy_compress(struct snappy_env *env,
 		.iov_base = compressed,
 		.iov_len = 0xffffffff,
 	};
-	int out = 1;
-	return snappy_compress_iov(env, 
-				   &iov_in, 1, input_length, 
-				   &iov_out, &out, compressed_length);
+        return rd_kafka_snappy_compress_iov(env,
+                                            &iov_in, 1, input_length,
+                                            &iov_out);
 }
-EXPORT_SYMBOL(snappy_compress);
+EXPORT_SYMBOL(rd_kafka_snappy_compress);
 
-int snappy_uncompress_iov(struct iovec *iov_in, int iov_in_len,
+int rd_kafka_snappy_uncompress_iov(struct iovec *iov_in, int iov_in_len,
 			   size_t input_len, char *uncompressed)
 {
 	struct source reader = {
@@ -1456,32 +1554,148 @@ int snappy_uncompress_iov(struct iovec *iov_in, int iov_in_len,
 	};
 	return internal_uncompress(&reader, &output, 0xffffffff);
 }
-EXPORT_SYMBOL(snappy_uncompress_iov);
+EXPORT_SYMBOL(rd_kafka_snappy_uncompress_iov);
 
 /**
- * snappy_uncompress - Uncompress a snappy compressed buffer
+ * rd_kafka_snappy_uncompress - Uncompress a snappy compressed buffer
  * @compressed: Input buffer with compressed data
  * @n: length of compressed buffer
  * @uncompressed: buffer for uncompressed data
  *
  * The uncompressed data buffer must be at least
- * snappy_uncompressed_length(compressed) bytes long.
+ * rd_kafka_snappy_uncompressed_length(compressed) bytes long.
  *
  * Return 0 on success, otherwise an negative error code.
  */
-int snappy_uncompress(const char *compressed, size_t n, char *uncompressed)
+int rd_kafka_snappy_uncompress(const char *compressed, size_t n, char *uncompressed)
 {
 	struct iovec iov = {
 		.iov_base = (char *)compressed,
 		.iov_len = n
 	};
-	return snappy_uncompress_iov(&iov, 1, n, uncompressed);
+	return rd_kafka_snappy_uncompress_iov(&iov, 1, n, uncompressed);
 }
-EXPORT_SYMBOL(snappy_uncompress);
+EXPORT_SYMBOL(rd_kafka_snappy_uncompress);
+
+
+/**
+ * @brief Decompress Snappy message with Snappy-java framing.
+ *
+ * @returns a malloced buffer with the uncompressed data, or NULL on failure.
+ */
+char *rd_kafka_snappy_java_uncompress (const char *inbuf, size_t inlen,
+                                       size_t *outlenp,
+                                       char *errstr, size_t errstr_size) {
+        int pass;
+        char *outbuf = NULL;
+
+        /**
+         * Traverse all chunks in two passes:
+         *  pass 1: calculate total uncompressed length
+         *  pass 2: uncompress
+         *
+         * Each chunk is prefixed with 4: length */
+
+        for (pass = 1 ; pass <= 2 ; pass++) {
+                ssize_t of = 0;  /* inbuf offset */
+                ssize_t uof = 0; /* outbuf offset */
+
+                while (of + 4 <= (ssize_t)inlen) {
+                        uint32_t clen; /* compressed length */
+                        size_t ulen; /* uncompressed length */
+                        int r;
+
+                        memcpy(&clen, inbuf+of, 4);
+                        clen = be32toh(clen);
+                        of += 4;
+
+                        if (unlikely(clen > inlen - of)) {
+                                rd_snprintf(errstr, errstr_size,
+                                            "Invalid snappy-java chunk length "
+                                            "%"PRId32" > %"PRIdsz
+                                            " available bytes",
+                                            clen, (ssize_t)inlen - of);
+                                return NULL;
+                        }
+
+                        /* Acquire uncompressed length */
+                        if (unlikely(!rd_kafka_snappy_uncompressed_length(
+                                             inbuf+of, clen, &ulen))) {
+                                rd_snprintf(errstr, errstr_size,
+                                            "Failed to get length of "
+                                            "(snappy-java framed) Snappy "
+                                            "compressed payload "
+                                            "(clen %"PRId32")",
+                                            clen);
+                                return NULL;
+                        }
+
+                        if (pass == 1) {
+                                /* pass 1: calculate total length */
+                                of  += clen;
+                                uof += ulen;
+                                continue;
+                        }
+
+                        /* pass 2: Uncompress to outbuf */
+                        if (unlikely((r = rd_kafka_snappy_uncompress(
+                                              inbuf+of, clen, outbuf+uof)))) {
+                                rd_snprintf(errstr, errstr_size,
+                                            "Failed to decompress Snappy-java "
+                                            "framed payload of size %"PRId32
+                                            ": %s",
+                                            clen,
+                                            rd_strerror(-r/*negative errno*/));
+                                rd_free(outbuf);
+                                return NULL;
+                        }
+
+                        of  += clen;
+                        uof += ulen;
+                }
+
+                if (unlikely(of != (ssize_t)inlen)) {
+                        rd_snprintf(errstr, errstr_size,
+                                    "%"PRIusz" trailing bytes in Snappy-java "
+                                    "framed compressed data",
+                                    inlen - of);
+                        if (outbuf)
+                                rd_free(outbuf);
+                        return NULL;
+                }
+
+                if (pass == 1) {
+                        if (uof <= 0) {
+                                rd_snprintf(errstr, errstr_size,
+                                            "Empty Snappy-java framed data");
+                                return NULL;
+                        }
+
+                        /* Allocate memory for uncompressed data */
+                        outbuf = rd_malloc(uof);
+                        if (unlikely(!outbuf)) {
+                                rd_snprintf(errstr, errstr_size,
+                                           "Failed to allocate memory "
+                                            "(%"PRIdsz") for "
+                                            "uncompressed Snappy data: %s",
+                                            uof, rd_strerror(errno));
+                                return NULL;
+                        }
+
+                } else {
+                        /* pass 2 */
+                        *outlenp = uof;
+                }
+        }
+
+        return outbuf;
+}
+
+
 
 #else
 /**
- * snappy_compress - Compress a buffer using the snappy compressor.
+ * rd_kafka_snappy_compress - Compress a buffer using the snappy compressor.
  * @env: Preallocated environment
  * @input: Input buffer
  * @input_length: Length of input_buffer
@@ -1491,13 +1705,13 @@ EXPORT_SYMBOL(snappy_uncompress);
  * Return 0 on success, otherwise an negative error code.
  *
  * The output buffer must be at least
- * snappy_max_compressed_length(input_length) bytes long.
+ * rd_kafka_snappy_max_compressed_length(input_length) bytes long.
  *
- * Requires a preallocated environment from snappy_init_env.
+ * Requires a preallocated environment from rd_kafka_snappy_init_env.
  * The environment does not keep state over individual calls
  * of this function, just preallocates the memory.
  */
-int snappy_compress(struct snappy_env *env,
+int rd_kafka_snappy_compress(struct snappy_env *env,
 		    const char *input,
 		    size_t input_length,
 		    char *compressed, size_t *compressed_length)
@@ -1509,26 +1723,26 @@ int snappy_compress(struct snappy_env *env,
 	struct sink writer = {
 		.dest = compressed,
 	};
-	int err = compress(env, &reader, &writer);
+	int err = sn_compress(env, &reader, &writer);
 
 	/* Compute how many bytes were added */
 	*compressed_length = (writer.dest - compressed);
 	return err;
 }
-EXPORT_SYMBOL(snappy_compress);
+EXPORT_SYMBOL(rd_kafka_snappy_compress);
 
 /**
- * snappy_uncompress - Uncompress a snappy compressed buffer
+ * rd_kafka_snappy_uncompress - Uncompress a snappy compressed buffer
  * @compressed: Input buffer with compressed data
  * @n: length of compressed buffer
  * @uncompressed: buffer for uncompressed data
  *
  * The uncompressed data buffer must be at least
- * snappy_uncompressed_length(compressed) bytes long.
+ * rd_kafka_snappy_uncompressed_length(compressed) bytes long.
  *
  * Return 0 on success, otherwise an negative error code.
  */
-int snappy_uncompress(const char *compressed, size_t n, char *uncompressed)
+int rd_kafka_snappy_uncompress(const char *compressed, size_t n, char *uncompressed)
 {
 	struct source reader = {
 		.ptr = compressed,
@@ -1540,12 +1754,17 @@ int snappy_uncompress(const char *compressed, size_t n, char *uncompressed)
 	};
 	return internal_uncompress(&reader, &output, 0xffffffff);
 }
-EXPORT_SYMBOL(snappy_uncompress);
+EXPORT_SYMBOL(rd_kafka_snappy_uncompress);
 #endif
+
+static inline void clear_env(struct snappy_env *env)
+{
+    memset(env, 0, sizeof(*env));
+}
 
 #ifdef SG
 /**
- * snappy_init_env_sg - Allocate snappy compression environment
+ * rd_kafka_snappy_init_env_sg - Allocate snappy compression environment
  * @env: Environment to preallocate
  * @sg: Input environment ever does scather gather
  *
@@ -1554,30 +1773,30 @@ EXPORT_SYMBOL(snappy_uncompress);
  * Returns 0 on success, otherwise negative errno.
  * Must run in process context.
  */
-int snappy_init_env_sg(struct snappy_env *env, bool sg)
+int rd_kafka_snappy_init_env_sg(struct snappy_env *env, bool sg)
 {
-	env->hash_table = vmalloc(sizeof(u16) * kmax_hash_table_size);
-	if (!env->hash_table)
+	if (rd_kafka_snappy_init_env(env) < 0)
 		goto error;
+
 	if (sg) {
 		env->scratch = vmalloc(kblock_size);
 		if (!env->scratch)
 			goto error;
 		env->scratch_output =
-			vmalloc(snappy_max_compressed_length(kblock_size));
+			vmalloc(rd_kafka_snappy_max_compressed_length(kblock_size));
 		if (!env->scratch_output)
 			goto error;
 	}
 	return 0;
 error:
-	snappy_free_env(env);
+	rd_kafka_snappy_free_env(env);
 	return -ENOMEM;
 }
-EXPORT_SYMBOL(snappy_init_env_sg);
+EXPORT_SYMBOL(rd_kafka_snappy_init_env_sg);
 #endif
 
 /**
- * snappy_init_env - Allocate snappy compression environment
+ * rd_kafka_snappy_init_env - Allocate snappy compression environment
  * @env: Environment to preallocate
  *
  * Passing multiple entries in an iovec is not allowed
@@ -1585,28 +1804,31 @@ EXPORT_SYMBOL(snappy_init_env_sg);
  * Returns 0 on success, otherwise negative errno.
  * Must run in process context.
  */
-int snappy_init_env(struct snappy_env *env)
+int rd_kafka_snappy_init_env(struct snappy_env *env)
 {
+    clear_env(env);
 	env->hash_table = vmalloc(sizeof(u16) * kmax_hash_table_size);
 	if (!env->hash_table)
 		return -ENOMEM;
 	return 0;
 }
-EXPORT_SYMBOL(snappy_init_env);
+EXPORT_SYMBOL(rd_kafka_snappy_init_env);
 
 /**
- * snappy_free_env - Free an snappy compression environment
+ * rd_kafka_snappy_free_env - Free an snappy compression environment
  * @env: Environment to free.
  *
  * Must run in process context.
  */
-void snappy_free_env(struct snappy_env *env)
+void rd_kafka_snappy_free_env(struct snappy_env *env)
 {
 	vfree(env->hash_table);
 #ifdef SG
 	vfree(env->scratch);
 	vfree(env->scratch_output);
 #endif
-	memset(env, 0, sizeof(struct snappy_env));
+	clear_env(env);
 }
-EXPORT_SYMBOL(snappy_free_env);
+EXPORT_SYMBOL(rd_kafka_snappy_free_env);
+
+#pragma GCC diagnostic pop /* -Wcast-align ignore */

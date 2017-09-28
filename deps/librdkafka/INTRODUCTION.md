@@ -1,3 +1,4 @@
+//@file INTRODUCTION.md
 # Introduction to librdkafka - the Apache Kafka C/C++ client library
 
 
@@ -35,8 +36,6 @@ librdkafka is a multi-threaded library designed for use on modern hardware and
 it attempts to keep memory copying at a minimal. The payload of produced or
 consumed messages may pass through without any copying
 (if so desired by the application) putting no limit on message sizes.
-
-> *"You can have high throughput or low latency, but you cant have both"*
 
 librdkafka allows you to decide if high throughput is the name of the game,
 or if a low latency service is required, all through the configuration
@@ -99,9 +98,9 @@ of messages to accumulate in the local queue before sending them off in
 one large message set or batch to the peer. This amortizes the messaging
 overhead and eliminates the adverse effect of the round trip time (rtt).
 
-The default settings, batch.num.messages=1000 and queue.buffering.max.ms=1000,
+The default settings, batch.num.messages=10000 and queue.buffering.max.ms=1000,
 are suitable for high throughput. This allows librdkafka to wait up to
-1000 ms for up to 1000 messages to accumulate in the local queue before
+1000 ms for up to 10000 messages to accumulate in the local queue before
 sending the accumulate messages to the broker.
 
 These setting are set globally (`rd_kafka_conf_t`) but applies on a
@@ -112,8 +111,9 @@ per topic+partition basis.
 
 When low latency messaging is required the "queue.buffering.max.ms" should be
 tuned to the maximum permitted producer-side latency.
-Setting queue.buffering.max.ms to 0 will make sure messages are sent as
-soon as possible.
+Setting queue.buffering.max.ms to 1 will make sure messages are sent as
+soon as possible. You could check out [How to decrease message latency](https://github.com/edenhill/librdkafka/wiki/How-to-decrease-message-latency)
+to find more details.
 
 
 ### Compression
@@ -172,7 +172,7 @@ The delivery report callback is optional.
 ### Documentation
 
 The librdkafka API is documented in the
-[`rdkafka.h`](https://github.com/edenhill/librdkafka/blob/master/rdkafka.h)
+[`rdkafka.h`](https://github.com/edenhill/librdkafka/blob/master/src/rdkafka.h)
 header file, the configuration properties are documented in 
 [`CONFIGURATION.md`](https://github.com/edenhill/librdkafka/blob/master/CONFIGURATION.md)
 
@@ -191,7 +191,7 @@ It is created by calling `rd_kafka_topic_new()`.
 Both `rd_kafka_t` and `rd_kafka_topic_t` comes with a configuration API which
 is optional.
 Not using the API will cause librdkafka to use its default values which are
-documented *`CONFIGURATION.md`*.
+documented in [`CONFIGURATION.md`](https://github.com/edenhill/librdkafka/blob/master/CONFIGURATION.md).
 
 **Note**: An application may create multiple `rd_kafka_t` objects and
 	they share no state.
@@ -210,7 +210,7 @@ properties as found in the official clients of Apache Kafka.
 Configuration is applied prior to object creation using the
 `rd_kafka_conf_set()` and `rd_kafka_topic_conf_set()` APIs.
 
-**Note**: The `rd_kafka.._conf_t` objects are not reusable after have been
+**Note**: The `rd_kafka.._conf_t` objects are not reusable after they have been
 	passed to `rd_kafka.._new()`.
 	The application does not need to free any config resources after a
 	`rd_kafka.._new()` call.
@@ -280,6 +280,21 @@ addresses for each connection attempt.
 A DNS record containing all broker address can thus be used to provide a
 reliable bootstrap broker.
 
+### Feature discovery
+
+Apache Kafka broker version 0.10.0 added support for the ApiVersionRequest API
+which allows a client to query a broker for its range of supported API versions.
+
+librdkafka supports this functionality and will query each broker on connect
+for this information (if `api.version.request=true`) and use it to enable or disable
+various protocol features, such as MessageVersion 1 (timestamps), KafkaConsumer, etc.
+
+If the broker fails to respond to the ApiVersionRequest librdkafka will
+assume the broker is too old to support the API and fall back to an older
+broker version's API. These fallback versions are hardcoded in librdkafka
+and is controlled by the `broker.version.fallback` configuration property.
+
+
 
 ### Producer API
 
@@ -294,7 +309,6 @@ The `rd_kafka_produce()` function takes the following arguments:
   * `partition` - partition to produce to. If this is set to
 	  `RD_KAFKA_PARTITION_UA` (UnAssigned) then the configured partitioner
 		  function will be used to select a target partition.
-  * `payload`,`len` - the message payload
   * `msgflags` - 0, or one of:
 	  * `RD_KAFKA_MSG_F_COPY` - librdkafka will immediately make a copy of
 	    the payload. Use this when the payload is in non-persistent
@@ -313,7 +327,7 @@ The `rd_kafka_produce()` function takes the following arguments:
 	payload memory.
 	The application must not free the payload in the delivery report
 	callback if `RD_KAFKA_MSG_F_FREE is set`.
-	
+  * `payload`,`len` - the message payload
   * `key`,`keylen` - an optional message key which can be used for partitioning.
 	  It will be passed to the topic partitioner callback, if any, and
 	  will be attached to the message when sending to the broker.
@@ -332,7 +346,9 @@ to `ENOBUFS`, thus providing a backpressure mechanism.
 **Note**: See `examples/rdkafka_performance.c` for a producer implementation.
 
 
-### Consumer API
+### Simple Consumer API (legacy)
+
+NOTE: For the high-level KafkaConsumer interface see rd_kafka_subscribe (rdkafka.h) or KafkaConsumer (rdkafkacpp.h)
 
 The consumer API is a bit more stateful than the producer API.
 After creating `rd_kafka_t` with type `RD_KAFKA_CONSUMER` and
@@ -402,7 +418,11 @@ purge any messages currently in the local queue.
 
 #### Offset management
 
-Offset management is available through a local offset file store, where the
+Broker based offset management is available for broker version >= 0.9.0
+in conjunction with using the high-level KafkaConsumer interface (see
+rdkafka.h or rdkafkacpp.h)
+
+Offset management is also available through a local offset file store, where the
 offset is periodically written to a local file for each topic+partition
 according to the following topic configuration properties:
 
@@ -417,10 +437,8 @@ There is currently no support for offset management with ZooKeeper.
 
 #### Consumer groups
 
-There is currently no support for consumer groups, the librdkafka consumer API
-resembles the official scala Simple Consumer.
-The application should provide its own consumer group management until
-librdkafka adds support for it.
+Broker based consumer groups (requires Apache Kafka broker >=0.9) are supported,
+see KafkaConsumer in rdkafka.h or rdkafkacpp.h
 
 
 ### Topics
@@ -429,6 +447,56 @@ librdkafka adds support for it.
 
 Topic auto creation is supported by librdkafka.
 The broker needs to be configured with "auto.create.topics.enable=true".
+
+
+
+### Metadata
+
+#### < 0.9.3
+Previous to the 0.9.3 release librdkafka's metadata handling
+was chatty and excessive, which usually isn't a problem in small
+to medium-sized clusters, but in large clusters with a large amount
+of librdkafka clients the metadata requests could hog broker CPU and bandwidth.
+
+#### > 0.9.3
+
+The remaining Metadata sections describe the current behaviour.
+
+**Note:** "Known topics" in the following section means topics for
+          locally created `rd_kafka_topic_t` objects.
+
+
+#### Query reasons
+
+There are four reasons to query metadata:
+
+ * brokers - update/populate cluster broker list, so the client can
+             find and connect to any new brokers added.
+
+ * specific topic - find leader or partition count for specific topic
+
+ * known topics - same, but for all locally known topics.
+
+ * all topics - get topic names for consumer group wildcard subscription
+                matching
+
+The above list is sorted so that the sub-sequent entries contain the
+information above, e.g., 'known topics' contains enough information to
+also satisfy 'specific topic' and 'brokers'.
+
+
+#### Caching strategy
+
+The prevalent cache timeout is `metadata.max.age.ms`, any cached entry
+will remain authoritative for this long or until a relevant broker error
+is returned.
+
+
+ * brokers - eternally cached, the broker list is additative.
+
+ * topics - cached for `metadata.max.age.ms`
+
+
 
 
 ## Appendix

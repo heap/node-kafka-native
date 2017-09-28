@@ -33,6 +33,15 @@
 
 #include "rdkafkacpp_int.h"
 
+const int32_t RdKafka::Topic::PARTITION_UA = RD_KAFKA_PARTITION_UA;
+
+const int64_t RdKafka::Topic::OFFSET_BEGINNING = RD_KAFKA_OFFSET_BEGINNING;
+
+const int64_t RdKafka::Topic::OFFSET_END = RD_KAFKA_OFFSET_END;
+
+const int64_t RdKafka::Topic::OFFSET_STORED = RD_KAFKA_OFFSET_STORED;
+
+const int64_t RdKafka::Topic::OFFSET_INVALID = RD_KAFKA_OFFSET_INVALID;
 
 RdKafka::Topic::~Topic () {
 
@@ -48,6 +57,19 @@ static int32_t partitioner_cb_trampoline (const rd_kafka_topic_t *rkt,
   std::string key(static_cast<const char *>(keydata), keylen);
   return topicimpl->partitioner_cb_->partitioner_cb(topicimpl, &key,
                                                     partition_cnt, msg_opaque);
+}
+
+static int32_t partitioner_kp_cb_trampoline (const rd_kafka_topic_t *rkt,
+                                             const void *keydata,
+                                             size_t keylen,
+                                             int32_t partition_cnt,
+                                             void *rkt_opaque,
+                                             void *msg_opaque) {
+  RdKafka::TopicImpl *topicimpl = static_cast<RdKafka::TopicImpl *>(rkt_opaque);
+  return topicimpl->partitioner_kp_cb_->partitioner_cb(topicimpl,
+                                                       keydata, keylen,
+                                                       partition_cnt,
+                                                       msg_opaque);
 }
 
 
@@ -78,13 +100,17 @@ RdKafka::Topic *RdKafka::Topic::create (Handle *base,
       rd_kafka_topic_conf_set_partitioner_cb(rkt_conf,
                                              partitioner_cb_trampoline);
       topic->partitioner_cb_ = confimpl->partitioner_cb_;
+    } else if (confimpl->partitioner_kp_cb_) {
+      rd_kafka_topic_conf_set_partitioner_cb(rkt_conf,
+                                             partitioner_kp_cb_trampoline);
+      topic->partitioner_kp_cb_ = confimpl->partitioner_kp_cb_;
     }
   }
 
 
   if (!(rkt = rd_kafka_topic_new(dynamic_cast<HandleImpl*>(base)->rk_,
 				 topic_str.c_str(), rkt_conf))) {
-    errstr = rd_kafka_err2str(rd_kafka_errno2err(errno));
+    errstr = rd_kafka_err2str(rd_kafka_last_error());
     delete topic;
     rd_kafka_topic_conf_destroy(rkt_conf);
     return NULL;

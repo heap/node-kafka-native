@@ -30,9 +30,6 @@
  * Tests messages are produced in order.
  */
 
-#define _GNU_SOURCE
-#include <sys/time.h>
-#include <time.h>
 
 #include "test.h"
 
@@ -69,17 +66,17 @@ static void dr_cb (rd_kafka_t *rk, void *payload, size_t len,
 }
 
 
-int main (int argc, char **argv) {
+int main_0005_order (int argc, char **argv) {
 	int partition = 0;
 	int r;
 	rd_kafka_t *rk;
 	rd_kafka_topic_t *rkt;
 	rd_kafka_conf_t *conf;
 	rd_kafka_topic_conf_t *topic_conf;
-	char errstr[512];
 	char msg[128];
-	int msgcnt = 100000;
+	int msgcnt = 50000;
 	int i;
+        test_timing_t t_produce, t_delivery;
 
 	test_conf_init(&conf, &topic_conf, 10);
 
@@ -87,36 +84,34 @@ int main (int argc, char **argv) {
 	rd_kafka_conf_set_dr_cb(conf, dr_cb);
 
 	/* Create kafka instance */
-	rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
-			  errstr, sizeof(errstr));
-	if (!rk)
-		TEST_FAIL("Failed to create rdkafka instance: %s\n", errstr);
+	rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
-	TEST_SAY("Created    kafka instance %s\n", rd_kafka_name(rk));
-
-	rkt = rd_kafka_topic_new(rk, test_mk_topic_name("generic", 0),
+	rkt = rd_kafka_topic_new(rk, test_mk_topic_name("0005", 0),
                                  topic_conf);
 	if (!rkt)
 		TEST_FAIL("Failed to create topic: %s\n",
-			  strerror(errno));
+			  rd_strerror(errno));
 
-	/* Produce a message */
+	/* Produce messages */
+        TIMING_START(&t_produce, "PRODUCE");
 	for (i = 0 ; i < msgcnt ; i++) {
 		int *msgidp = malloc(sizeof(*msgidp));
 		*msgidp = i;
-		snprintf(msg, sizeof(msg), "%s test message #%i", argv[0], i);
+		rd_snprintf(msg, sizeof(msg), "%s test message #%i", argv[0], i);
 		r = rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY,
 				     msg, strlen(msg), NULL, 0, msgidp);
 		if (r == -1)
 			TEST_FAIL("Failed to produce message #%i: %s\n",
-				  i, strerror(errno));
+				  i, rd_strerror(errno));
 	}
-
+        TIMING_STOP(&t_produce);
 	TEST_SAY("Produced %i messages, waiting for deliveries\n", msgcnt);
 
-	/* Wait for messages to time out */
+	/* Wait for messages to be delivered */
+        TIMING_START(&t_delivery, "DELIVERY");
 	while (rd_kafka_outq_len(rk) > 0)
 		rd_kafka_poll(rk, 50);
+        TIMING_STOP(&t_delivery);
 
 	if (fails)
 		TEST_FAIL("%i failures, see previous errors", fails);
@@ -132,11 +127,5 @@ int main (int argc, char **argv) {
 	TEST_SAY("Destroying kafka instance %s\n", rd_kafka_name(rk));
 	rd_kafka_destroy(rk);
 
-	/* Wait for everything to be cleaned up since broker destroys are
-	 * handled in its own thread. */
-	test_wait_exit(10);
-
-	/* If we havent failed at this point then
-	 * there were no threads leaked */
 	return 0;
 }

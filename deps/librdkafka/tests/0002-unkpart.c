@@ -31,10 +31,6 @@
  * Issue #39
  */
 
-#define _GNU_SOURCE
-#include <sys/time.h>
-#include <time.h>
-
 #include "test.h"
 
 /* Typical include path would be <librdkafka/rdkafka.h>, but this program
@@ -69,17 +65,17 @@ static void dr_cb (rd_kafka_t *rk, void *payload, size_t len,
 }
 
 
-int main (int argc, char **argv) {
+int main_0002_unkpart (int argc, char **argv) {
 	int partition = 99; /* non-existent */
 	int r;
 	rd_kafka_t *rk;
 	rd_kafka_topic_t *rkt;
 	rd_kafka_conf_t *conf;
 	rd_kafka_topic_conf_t *topic_conf;
-	char errstr[512];
 	char msg[128];
 	int msgcnt = 10;
 	int i;
+	int fails = 0;
         const struct rd_kafka_metadata *metadata;
 
 	test_conf_init(&conf, &topic_conf, 10);
@@ -88,22 +84,18 @@ int main (int argc, char **argv) {
 	rd_kafka_conf_set_dr_cb(conf, dr_cb);
 
 	/* Create kafka instance */
-	rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
-			  errstr, sizeof(errstr));
-	if (!rk)
-		TEST_FAIL("Failed to create rdkafka instance: %s\n", errstr);
+	rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
-	TEST_SAY("Created    kafka instance %s\n", rd_kafka_name(rk));
-
-	rkt = rd_kafka_topic_new(rk, test_mk_topic_name("generic", 0),
+	rkt = rd_kafka_topic_new(rk, test_mk_topic_name("0002", 0),
                                  topic_conf);
 	if (!rkt)
 		TEST_FAIL("Failed to create topic: %s\n",
-			  strerror(errno));
+                          rd_kafka_err2str(rd_kafka_last_error()));
 
         /* Request metadata so that we know the cluster is up before producing
          * messages, otherwise erroneous partitions will not fail immediately.*/
-        if ((r = rd_kafka_metadata(rk, 0, rkt, &metadata, 2000)) !=
+        if ((r = rd_kafka_metadata(rk, 0, rkt, &metadata,
+				   tmout_multip(15000))) !=
             RD_KAFKA_RESP_ERR_NO_ERROR)
                 TEST_FAIL("Failed to acquire metadata: %s\n",
                           rd_kafka_err2str(r));
@@ -114,20 +106,23 @@ int main (int argc, char **argv) {
 	for (i = 0 ; i < msgcnt ; i++) {
 		int *msgidp = malloc(sizeof(*msgidp));
 		*msgidp = i;
-		snprintf(msg, sizeof(msg), "%s test message #%i", argv[0], i);
+		rd_snprintf(msg, sizeof(msg), "%s test message #%i", argv[0], i);
 		r = rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY,
 				     msg, strlen(msg), NULL, 0, msgidp);
-		if (r == -1) {
-			if (errno == ESRCH)
+                if (r == -1) {
+			if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__UNKNOWN_PARTITION)
 				TEST_SAY("Failed to produce message #%i: "
 					 "unknown partition: good!\n", i);
 			else
 				TEST_FAIL("Failed to produce message #%i: %s\n",
-					  i, strerror(errno));
+					  i, rd_kafka_err2str(rd_kafka_last_error()));
+                        free(msgidp);
 		} else {
-			if (i > 5)
-				TEST_FAIL("Message #%i produced: "
-					  "should've failed\n", i);
+			if (i > 5) {
+				fails++;
+				TEST_SAY("Message #%i produced: "
+					 "should've failed\n", i);
+			}
 			msgs_wait |= (1 << i);
 		}
 
@@ -136,15 +131,18 @@ int main (int argc, char **argv) {
 		 * count: this will make subsequent produce() calls fail
 		 * immediately. */
 		if (i == 5)
-			sleep(2);
+			rd_sleep(2);
 	}
 
 	/* Wait for messages to time out */
-	while (rd_kafka_outq_len(rk) > 0)
-		rd_kafka_poll(rk, 50);
+	rd_kafka_flush(rk, -1);
 
 	if (msgs_wait != 0)
 		TEST_FAIL("Still waiting for messages: 0x%x\n", msgs_wait);
+
+
+	if (fails > 0)
+		TEST_FAIL("See previous error(s)\n");
 
 	/* Destroy topic */
 	rd_kafka_topic_destroy(rkt);
@@ -153,11 +151,5 @@ int main (int argc, char **argv) {
 	TEST_SAY("Destroying kafka instance %s\n", rd_kafka_name(rk));
 	rd_kafka_destroy(rk);
 
-	/* Wait for everything to be cleaned up since broker destroys are
-	 * handled in its own thread. */
-	test_wait_exit(10);
-
-	/* If we havent failed at this point then
-	 * there were no threads leaked */
 	return 0;
 }

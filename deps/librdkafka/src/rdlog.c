@@ -26,23 +26,23 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "rdkafka_int.h"
+#include "rdlog.h"
+
 #include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
 
-#include "rd.h"
-#include "rdthread.h"
-#include "rdlog.h"
 
 
 
 void rd_hexdump (FILE *fp, const char *name, const void *ptr, size_t len) {
 	const char *p = (const char *)ptr;
-	int of = 0;
+	size_t of = 0;
 
 
 	if (name)
-		fprintf(fp, "%s hexdump (%zu bytes):\n", name, len);
+		fprintf(fp, "%s hexdump (%"PRIusz" bytes):\n", name, len);
 
 	for (of = 0 ; of < len ; of += 16) {
 		char hexen[16*3+1];
@@ -50,14 +50,40 @@ void rd_hexdump (FILE *fp, const char *name, const void *ptr, size_t len) {
 		int hof = 0;
 
 		int cof = 0;
-		int i;
+		unsigned int i;
 
-		for (i = of ; i < of + 16 && i < len ; i++) {
-			hof += sprintf(hexen+hof, "%02x ", p[i] & 0xff);
-			cof += sprintf(charen+cof, "%c",
-				       isprint((int)p[i]) ? p[i] : '.');
+		for (i = (unsigned int)of ; i < (unsigned int)of + 16 && i < len ; i++) {
+			hof += rd_snprintf(hexen+hof, sizeof(hexen)-hof,
+					   "%02x ",
+					   p[i] & 0xff);
+			cof += rd_snprintf(charen+cof, sizeof(charen)-cof, "%c",
+					   isprint((int)p[i]) ? p[i] : '.');
 		}
-		fprintf(fp, "%08x: %-48s %-16s\n",
+		fprintf(fp, "%08zx: %-48s %-16s\n",
 			of, hexen, charen);
 	}
+}
+
+
+void rd_iov_print (const char *what, int iov_idx, const struct iovec *iov,
+                   int hexdump) {
+        printf("%s:  iov #%i: %"PRIusz"\n", what, iov_idx,
+               (size_t)iov->iov_len);
+        if (hexdump)
+                rd_hexdump(stdout, what, iov->iov_base, iov->iov_len);
+}
+
+
+void rd_msghdr_print (const char *what, const struct msghdr *msg,
+                      int hexdump) {
+        int i;
+        size_t len = 0;
+
+        printf("%s: iovlen %"PRIusz"\n", what, (size_t)msg->msg_iovlen);
+
+        for (i = 0 ; i < (int)msg->msg_iovlen ; i++) {
+                rd_iov_print(what, i, &msg->msg_iov[i], hexdump);
+                len += msg->msg_iov[i].iov_len;
+        }
+        printf("%s: ^ message was %"PRIusz" bytes in total\n", what, len);
 }
